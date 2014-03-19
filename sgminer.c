@@ -529,6 +529,9 @@ struct pool *add_pool(void)
 	if (!pool)
 		quit(1, "Failed to calloc pool in add_pool");
 	pool->pool_no = pool->prio = total_pools;
+  pool->algorithm = algorithm->name;
+  pool->algorithm_nfactor = algorithm->nfactor;
+  pool->algorithm_n = algorithm->n;
 
 	/* Default pool name */
 	char buf[32];
@@ -750,6 +753,35 @@ static char *set_url(char *arg)
 
 	setup_url(pool, arg);
 	return NULL;
+}
+
+static char *set_pool_algorithm(char *arg)
+{
+  struct pool *pool;
+
+  while ((json_array_index + 1) > total_pools)
+    add_pool();
+  pool = pools[json_array_index];
+
+  applog(LOG_DEBUG, "Setting pool %i algorithm to %s", pool->pool_no, arg);
+  opt_set_charp(arg, &pool->algorithm);
+
+  return NULL;
+}
+
+static char *set_pool_nfactor(char *arg)
+{
+  struct pool *pool;
+
+  while ((json_array_index + 1) > total_pools)
+    add_pool();
+  pool = pools[json_array_index];
+
+  applog(LOG_DEBUG, "Setting pool %i N-factor to %s", pool->pool_no, arg);
+  pool->algorithm_nfactor = (uint8_t)atoi(arg);
+  pool->algorithm_n = (1 << pool->algorithm_nfactor);
+
+  return NULL;
 }
 
 static char *set_poolname(char *arg)
@@ -1376,9 +1408,15 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--thread-concurrency",
 		     set_thread_concurrency, NULL, NULL,
 		     "Set GPU thread concurrency for scrypt mining, comma separated"),
-	OPT_WITH_ARG("--url|-o",
-		     set_url, NULL, NULL,
-		     "URL for bitcoin JSON-RPC server"),
+  OPT_WITH_ARG("--url|-o",
+         set_url, NULL, NULL,
+         "URL for bitcoin JSON-RPC server"),
+  OPT_WITH_ARG("--pool-algorithm",
+         set_pool_algorithm, NULL, NULL,
+         "Set algorithm for pool"),
+  OPT_WITH_ARG("--pool-nfactor",
+         set_pool_nfactor, NULL, NULL,
+         "Set N-factor for pool"),
 	OPT_WITH_ARG("--user|-u",
 		     set_user, NULL, NULL,
 		     "Username for bitcoin JSON-RPC server"),
@@ -3763,10 +3801,29 @@ void switch_pools(struct pool *selected)
 			clear_pool_work(last_pool);
 	}
 
+  if (pool->algorithm) {
+    if (strcmp(pool->algorithm, last_pool->algorithm) != 0) {
+      applog(LOG_WARNING, "Switching algorithm from %s to %s", last_pool->algorithm, pool->algorithm);
+      if (nDevs) {
+        for(i = 0; i < nDevs; i++) {
+          reinit_device(&gpus[i]);
+        }
+      }
+    }
+  } else if (pool->algorithm_nfactor) {
+    if (pool->algorithm_nfactor != last_pool->algorithm_nfactor) {
+      applog(LOG_WARNING, "Switching N-factor from %s to %s", last_pool->algorithm_nfactor, pool->algorithm_nfactor);
+      if (nDevs) {
+        for(i = 0; i < nDevs; i++) {
+          reinit_device(&gpus[i]);
+        }
+      }
+    }
+  }
+
 	mutex_lock(&lp_lock);
 	pthread_cond_broadcast(&lp_cond);
 	mutex_unlock(&lp_lock);
-
 }
 
 void discard_work(struct work *work)

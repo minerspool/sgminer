@@ -1207,7 +1207,9 @@ static void opencl_detect(bool hotplug)
 
 static void reinit_opencl_device(struct cgpu_info *gpu)
 {
-	tq_push(control_thr[gpur_thr_id].q, gpu);
+	if (control_thr[gpur_thr_id].q) {
+    tq_push(control_thr[gpur_thr_id].q, gpu);
+  }
 }
 
 #ifdef HAVE_ADL

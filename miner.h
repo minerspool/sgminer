@@ -1226,6 +1226,10 @@ struct pool {
 	proxytypes_t rpc_proxytype;
 	char *rpc_proxy;
 
+  char *algorithm;
+  uint8_t algorithm_nfactor;
+  uint32_t algorithm_n;
+
 	pthread_mutex_t pool_lock;
 	cglock_t data_lock;
 

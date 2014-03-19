@@ -372,7 +372,7 @@ static void scrypt_n_1_1_256_sp(const uint32_t* input, char* scratchpad, uint32_
 
 	PBKDF2_SHA256_80_128(input, X);
 
-	for (i = 0; i < algorithm->n; i += 2) {
+	for (i = 0; i < current_pool()->algorithm_n; i += 2) {
 		memcpy(&V[i * 32], X, 128);
 
 		salsa20_8(&X[0], &X[16]);
@@ -383,8 +383,8 @@ static void scrypt_n_1_1_256_sp(const uint32_t* input, char* scratchpad, uint32_
 		salsa20_8(&X[0], &X[16]);
 		salsa20_8(&X[16], &X[0]);
 	}
-	for (i = 0; i < algorithm->n; i += 2) {
-		j = X[16] & (algorithm->n-1);
+	for (i = 0; i < current_pool()->algorithm_n; i += 2) {
+		j = X[16] & (current_pool()->algorithm_n-1);
 		p2 = (uint64_t *)(&V[j * 32]);
 		for(k = 0; k < 16; k++)
 			p1[k] ^= p2[k];
@@ -392,7 +392,7 @@ static void scrypt_n_1_1_256_sp(const uint32_t* input, char* scratchpad, uint32_
 		salsa20_8(&X[0], &X[16]);
 		salsa20_8(&X[16], &X[0]);
 
-		j = X[16] & (algorithm->n-1);
+		j = X[16] & (current_pool()->algorithm_n-1);
 		p2 = (uint64_t *)(&V[j * 32]);
 		for(k = 0; k < 16; k++)
 			p1[k] ^= p2[k];
@@ -414,7 +414,7 @@ void scrypt_regenhash(struct work *work)
 	be32enc_vect(data, (const uint32_t *)work->data, 19);
 	data[19] = htobe32(*nonce);
 
-	scratchbuf = (char *)alloca(algorithm->n * 128 + 512);
+	scratchbuf = (char *)alloca(current_pool()->algorithm_n * 128 + 512);
 	scrypt_n_1_1_256_sp(data, scratchbuf, ohash);
 	flip32(ohash, ohash);
 }
@@ -433,7 +433,7 @@ int scrypt_test(unsigned char *pdata, const unsigned char *ptarget, uint32_t non
 	be32enc_vect(data, (const uint32_t *)pdata, 19);
 	data[19] = htobe32(nonce);
 	scratchbuf = (char *)alloca(SCRATCHBUF_SIZE);
-	scrypt_n_1_1_256_sp(data, scratchbuf, ohash, algorithm->n);
+	scrypt_n_1_1_256_sp(data, scratchbuf, ohash, current_pool()->algorithm_n);
 	tmp_hash7 = be32toh(ohash[7]);
 
 	applog(LOG_DEBUG, "htarget %08lx diff1 %08lx hash %08lx",
@@ -472,7 +472,7 @@ bool scanhash_scrypt(struct thr_info *thr, const unsigned char __maybe_unused *p
 
 		*nonce = ++n;
 		data[19] = htobe32(n);
-		scrypt_n_1_1_256_sp(data, scratchbuf, ostate, algorithm->n);
+		scrypt_n_1_1_256_sp(data, scratchbuf, ostate, current_pool()->algorithm_n);
 		tmp_hash7 = be32toh(ostate[7]);
 
 		if (unlikely(tmp_hash7 <= Htarg)) {
