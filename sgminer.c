@@ -3800,11 +3800,14 @@ void switch_pools(struct pool *selected)
   if (pool->algorithm) {
     if (strcmp(pool->algorithm, algorithm->name) != 0) {
       applog(LOG_WARNING, "Switching algorithm from %s to %s", algorithm->name, pool->algorithm);
+      printf("1");
       set_algorithm(algorithm, pool->algorithm);
-
+      printf("2");
       if (nDevs) {
-        for(i = 0; i < nDevs; i++)
+        for(i = 0; i < nDevs; i++) {
+          printf("3");
           reinit_device(&gpus[i]);
+        }
       }
     }
   }
