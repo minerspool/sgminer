@@ -3730,7 +3730,7 @@ static bool pool_unusable(struct pool *pool)
 void switch_pools(struct pool *selected)
 {
 	struct pool *pool, *last_pool;
-	int i, pool_no, next_pool;
+	int i, j, pool_no, next_pool;
 
 	cg_wlock(&control_lock);
 	last_pool = currentpool;
@@ -3801,23 +3801,24 @@ void switch_pools(struct pool *selected)
 			clear_pool_work(last_pool);
 	}
 
+  j = 0;
   if (pool->algorithm) {
     if (strcmp(pool->algorithm, last_pool->algorithm) != 0) {
-      applog(LOG_WARNING, "Switching algorithm from %s to %s", last_pool->algorithm, pool->algorithm);
-      if (nDevs) {
-        for(i = 0; i < nDevs; i++) {
-          reinit_device(&gpus[i]);
-        }
-      }
+      set_algo(pool->algorithm);
+      j = 1;
     }
-  } else if (pool->algorithm_nfactor) {
+  }
+  if (pool->algorithm_nfactor) {
     if (pool->algorithm_nfactor != last_pool->algorithm_nfactor) {
+      set_algorithm_nfactor(algorithm, pool->algorithm_nfactor);
       applog(LOG_WARNING, "Switching N-factor from %s to %s", last_pool->algorithm_nfactor, pool->algorithm_nfactor);
-      if (nDevs) {
-        for(i = 0; i < nDevs; i++) {
-          reinit_device(&gpus[i]);
-        }
-      }
+      j = 1;
+    }
+  }
+
+  if (j && nDevs) {
+    for(i = 0; i < nDevs; i++) {
+      reinit_device(&gpus[i]);
     }
   }
 
