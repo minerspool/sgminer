@@ -3731,6 +3731,7 @@ void switch_pools(struct pool *selected)
 {
 	struct pool *pool, *last_pool;
 	int i, j, pool_no, next_pool;
+  algorithm_t *new_algo, *old_algo;
 
 	cg_wlock(&control_lock);
 	last_pool = currentpool;
@@ -3801,21 +3802,16 @@ void switch_pools(struct pool *selected)
 			clear_pool_work(last_pool);
 	}
 
-  j = 0;
-  if (pool->algorithm) {
-    if (strcmp(pool->algorithm, last_pool->algorithm) != 0) {
-      set_algo(pool->algorithm);
-      j = 1;
-    }
-  }
-  if (pool->algorithm_nfactor) {
-    if (pool->algorithm_nfactor != last_pool->algorithm_nfactor) {
-      set_algorithm_nfactor(algorithm, pool->algorithm_nfactor);
-      applog(LOG_WARNING, "Switching N-factor from %s to %s", last_pool->algorithm_nfactor, pool->algorithm_nfactor);
-      j = 1;
-    }
-  }
 
+  new_algo = (algorithm_t *)alloca(sizeof(algorithm_t));
+  set_algorithm(new_algo, pool->algorithm);
+  set_algorithm_nfactor(new_algo, pool->algorithm_nfactor);
+  old_algo = algorithm;
+  algorithm = new_algo;
+  set_algorithm(old_algo, pool->algorithm);
+  set_algorithm_nfactor(old_algo, pool->algorithm_nfactor);
+  algorithm = old_algo;
+  
   if (j && nDevs) {
     for(i = 0; i < nDevs; i++) {
       reinit_device(&gpus[i]);
