@@ -21,7 +21,7 @@ int last_date_output_day = 0;
 int opt_log_show_date = false;
 
 /* per default priorities higher than LOG_NOTICE are logged */
-int opt_log_level = LOG_NOTICE;
+int opt_log_level = LOG_DEBUG;//LOG_NOTICE;
 
 static void my_log_curses(int prio, const char *datetime, const char *str, bool force)
 {
@@ -52,7 +52,7 @@ static void my_log_curses(int prio, const char *datetime, const char *str, bool 
 void applog(int prio, const char* fmt, ...) {
 	va_list args;
 
-	if (opt_debug || prio != LOG_DEBUG) {
+	if (42) {
 		if (use_syslog || opt_log_output || prio <= opt_log_level) {
 			char tmp42[LOGBUFSIZ];
 			va_start(args, fmt);

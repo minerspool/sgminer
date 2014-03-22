@@ -333,6 +333,7 @@ struct device_drv {
 	char *(*set_device)(struct cgpu_info *, char *option, char *setting, char *replybuf);
 
 	// Thread-specific functions
+  bool (*thread_reinit)(struct thr_info *);
 	bool (*thread_prepare)(struct thr_info *);
 	uint64_t (*can_limit_work)(struct thr_info *);
 	bool (*thread_init)(struct thr_info *);
@@ -1225,6 +1226,10 @@ struct pool {
 	char *rpc_user, *rpc_pass;
 	proxytypes_t rpc_proxytype;
 	char *rpc_proxy;
+
+  char *algorithm;
+  uint8_t algorithm_nfactor;
+  uint32_t algorithm_n;
 
 	pthread_mutex_t pool_lock;
 	cglock_t data_lock;

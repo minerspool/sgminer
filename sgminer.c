@@ -97,6 +97,7 @@ int opt_log_interval = 5;
 int opt_queue = 1;
 int opt_scantime = 7;
 int opt_expiry = 28;
+int test_val = 1;
 
 char *opt_algorithm;
 algorithm_t *algorithm;
@@ -196,6 +197,7 @@ pthread_rwlock_t mining_thr_lock;
 pthread_rwlock_t devices_lock;
 
 static pthread_mutex_t lp_lock;
+static pthread_mutex_t algo_lock;
 static pthread_cond_t lp_cond;
 
 pthread_mutex_t restart_lock;
@@ -529,6 +531,9 @@ struct pool *add_pool(void)
 	if (!pool)
 		quit(1, "Failed to calloc pool in add_pool");
 	pool->pool_no = pool->prio = total_pools;
+  pool->algorithm = algorithm->name;
+  pool->algorithm_nfactor = algorithm->nfactor;
+  pool->algorithm_n = algorithm->n;
 
 	/* Default pool name */
 	char buf[32];
@@ -750,6 +755,35 @@ static char *set_url(char *arg)
 
 	setup_url(pool, arg);
 	return NULL;
+}
+
+static char *set_pool_algorithm(char *arg)
+{
+  struct pool *pool;
+
+  while ((json_array_index + 1) > total_pools)
+    add_pool();
+  pool = pools[json_array_index];
+
+  applog(LOG_DEBUG, "Setting pool %i algorithm to %s", pool->pool_no, arg);
+  opt_set_charp(arg, &pool->algorithm);
+
+  return NULL;
+}
+
+static char *set_pool_nfactor(char *arg)
+{
+  struct pool *pool;
+
+  while ((json_array_index + 1) > total_pools)
+    add_pool();
+  pool = pools[json_array_index];
+
+  applog(LOG_DEBUG, "Setting pool %i N-factor to %s", pool->pool_no, arg);
+  pool->algorithm_nfactor = (uint8_t)atoi(arg);
+  pool->algorithm_n = (1 << pool->algorithm_nfactor);
+
+  return NULL;
 }
 
 static char *set_poolname(char *arg)
@@ -1376,9 +1410,15 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--thread-concurrency",
 		     set_thread_concurrency, NULL, NULL,
 		     "Set GPU thread concurrency for scrypt mining, comma separated"),
-	OPT_WITH_ARG("--url|-o",
-		     set_url, NULL, NULL,
-		     "URL for bitcoin JSON-RPC server"),
+  OPT_WITH_ARG("--url|-o",
+         set_url, NULL, NULL,
+         "URL for bitcoin JSON-RPC server"),
+  OPT_WITH_ARG("--pool-algorithm",
+         set_pool_algorithm, NULL, NULL,
+         "Set algorithm for pool"),
+  OPT_WITH_ARG("--pool-nfactor",
+         set_pool_nfactor, NULL, NULL,
+         "Set N-factor for pool"),
 	OPT_WITH_ARG("--user|-u",
 		     set_user, NULL, NULL,
 		     "Username for bitcoin JSON-RPC server"),
@@ -3692,9 +3732,24 @@ static bool pool_unusable(struct pool *pool)
 void switch_pools(struct pool *selected)
 {
 	struct pool *pool, *last_pool;
-	int i, pool_no, next_pool;
+  struct thr_info *thr;
+	int i, j, pool_no, next_pool;
+  algorithm_t *new_algo, *old_algo;
 
-	cg_wlock(&control_lock);
+  mutex_lock(&algo_lock);
+
+  rd_lock(&mining_thr_lock);
+  for (i = 0; i < mining_threads; i++) {
+    mining_thr[i]->pause = true;
+    while (mining_thr[i]->cgpu->rolling != 0) {
+      applog(LOG_WARNING, "Waiting for thread %d: %d\n", i, mining_thr[i]->cgpu->rolling);
+      sleep(1);
+    }
+  }
+  rd_unlock(&mining_thr_lock);
+
+  cg_wlock(&control_lock);
+
 	last_pool = currentpool;
 	pool_no = currentpool->pool_no;
 
@@ -3763,10 +3818,31 @@ void switch_pools(struct pool *selected)
 			clear_pool_work(last_pool);
 	}
 
+  if (nDevs) {
+    applog(LOG_WARNING, "Mining threads: %d\n", mining_threads);
+
+    set_algorithm(algorithm, pool->algorithm);
+    set_algorithm_nfactor(algorithm, pool->algorithm_nfactor);
+    applog(LOG_WARNING, "Set algo: %s %d", pool->algorithm, pool->algorithm_nfactor);
+
+    cg_wlock(&control_lock);
+
+    for(i = 0; i < nDevs; i++) {
+      applog(LOG_WARNING, "reinit %d\n", i);
+      thr = get_thread(i);
+      thr->cgpu->drv->thread_reinit(thr);
+      thr->pause = false;
+      cgsem_post(&thr->sem);
+    }
+
+    cg_wunlock(&control_lock);
+  }
+
+  mutex_unlock(&algo_lock);
+
 	mutex_lock(&lp_lock);
 	pthread_cond_broadcast(&lp_cond);
 	mutex_unlock(&lp_lock);
-
 }
 
 void discard_work(struct work *work)
@@ -6233,13 +6309,20 @@ static void hash_sole_work(struct thr_info *mythr)
 	struct timeval diff, sdiff, wdiff = {0, 0};
 	uint32_t max_nonce = drv->can_limit_work(mythr);
 	int64_t hashes_done = 0;
+  int my_val = test_val++;
+  struct timeval tv1, tv2;
 
 	tv_end = &getwork_start;
 	cgtime(&getwork_start);
 	sdiff.tv_sec = sdiff.tv_usec = 0;
 	cgtime(&tv_lastupdate);
 
+  applog(LOG_WARNING, "START hash_sole_work START");
+
+  //applog(LOG_WARNING, "Sole work start %d.\n", my_val);
+
 	while (likely(!cgpu->shutdown)) {
+    //applog(LOG_WARNING, "Sole work outer loop %d.\n", my_val);
 		struct work *work = get_work(mythr, thr_id);
 		int64_t hashes;
 
@@ -6273,6 +6356,7 @@ static void hash_sole_work(struct thr_info *mythr)
 		set_target(work->device_target, work->device_diff);
 
 		do {
+      //applog(LOG_WARNING, "Sole work inner loop %d.\n", my_val);
 			cgtime(&tv_start);
 
 			subtime(&tv_start, &getwork_start);
@@ -6300,7 +6384,10 @@ static void hash_sole_work(struct thr_info *mythr)
 			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
 			thread_reportin(mythr);
+      cgtime(&tv1);
 			hashes = drv->scanhash(mythr, work, work->blk.nonce + max_nonce);
+      cgtime(&tv2);
+      //applog(LOG_WARNING, "SCAN %f s", tdiff(&tv2, &tv1));
 			thread_reportout(mythr);
 
 			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
@@ -6352,6 +6439,7 @@ static void hash_sole_work(struct thr_info *mythr)
 			/* Update the hashmeter at most 5 times per second */
 			if ((hashes_done && (diff.tv_sec > 0 || diff.tv_usec > 200000)) ||
 			    diff.tv_sec >= opt_log_interval) {
+        applog(LOG_WARNING, "hashmeter hash_sole_work");
 				hashmeter(thr_id, &diff, hashes_done);
 				hashes_done = 0;
 				copy_time(&tv_lastupdate, tv_end);
@@ -6626,6 +6714,7 @@ void hash_queued_work(struct thr_info *mythr)
 		/* Update the hashmeter at most 5 times per second */
 		if ((hashes_done && (diff.tv_sec > 0 || diff.tv_usec > 200000)) ||
 		    diff.tv_sec >= opt_log_interval) {
+      applog(LOG_WARNING, "hashmeter hash_queued_work");
 			hashmeter(thr_id, &diff, hashes_done);
 			hashes_done = 0;
 			copy_time(&tv_start, &tv_end);
@@ -6677,6 +6766,7 @@ void hash_driver_work(struct thr_info *mythr)
 		/* Update the hashmeter at most 5 times per second */
 		if ((hashes_done && (diff.tv_sec > 0 || diff.tv_usec > 200000)) ||
 		    diff.tv_sec >= opt_log_interval) {
+      applog(LOG_WARNING, "hashmeter hash_driver_work");
 			hashmeter(thr_id, &diff, hashes_done);
 			hashes_done = 0;
 			copy_time(&tv_start, &tv_end);
@@ -7086,6 +7176,7 @@ static void *watchdog_thread(void __maybe_unused *userdata)
 
 		discard_stale();
 
+    applog(LOG_WARNING, "hashmeter watchdog\n");
 		hashmeter(-1, &zero_tv, 0);
 
 #ifdef HAVE_CURSES
@@ -7835,7 +7926,8 @@ int main(int argc, char *argv[])
 	rwlock_init(&mining_thr_lock);
 	rwlock_init(&devices_lock);
 
-	mutex_init(&lp_lock);
+  mutex_init(&lp_lock);
+  mutex_init(&algo_lock);
 	if (unlikely(pthread_cond_init(&lp_cond, NULL)))
 		quit(1, "Failed to pthread_cond_init lp_cond");
 

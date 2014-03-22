@@ -1077,6 +1077,7 @@ void *reinit_gpu(void *userdata)
 
 select_cgpu:
 	cgpu = (struct cgpu_info *)tq_pop(mythr->q, NULL);
+  applog(LOG_WARNING, "Reinit GPU start...");
 	if (!cgpu)
 		goto out;
 
@@ -1106,6 +1107,8 @@ select_cgpu:
 		cgtime(&thr->sick);
 		if (!pthread_cancel(thr->pth)) {
 			applog(LOG_WARNING, "Thread %d still exists, killing it off", thr_id);
+      pthread_join(thr->pth, NULL);
+      thr->cgpu->drv->thread_shutdown(thr);
 		} else
 			applog(LOG_WARNING, "Thread %d no longer exists", thr_id);
 	}
@@ -1207,7 +1210,9 @@ static void opencl_detect(bool hotplug)
 
 static void reinit_opencl_device(struct cgpu_info *gpu)
 {
-	tq_push(control_thr[gpur_thr_id].q, gpu);
+	if (control_thr[gpur_thr_id].q) {
+    tq_push(control_thr[gpur_thr_id].q, gpu);
+  }
 }
 
 #ifdef HAVE_ADL
@@ -1408,6 +1413,8 @@ static int64_t opencl_scanhash(struct thr_info *thr, struct work *work,
 	int found = FOUND;
 	int buffersize = BUFFERSIZE;
 
+  struct timeval tv1, tv2;
+
 	/* Windows' timer resolution is only 15ms so oversample 5x */
 	if (gpu->dynamic && (++gpu->intervals * dynamic_us) > 70000) {
 		struct timeval tv_gpuend;
@@ -1464,7 +1471,12 @@ static int64_t opencl_scanhash(struct thr_info *thr, struct work *work,
 	work->blk.nonce += gpu->max_hashes;
 
 	/* This finish flushes the readbuffer set with CL_FALSE in clEnqueueReadBuffer */
-	clFinish(clState->commandQueue);
+
+  cgtime(&tv1);
+  clFinish(clState->commandQueue);
+  cgtime(&tv2);
+  applog(LOG_WARNING, "SCAN1 %f s", tdiff(&tv2, &tv1));
+  
 
 	/* FOUND entry is used as a counter to say how many nonces exist */
 	if (thrdata->res[found]) {
@@ -1490,10 +1502,70 @@ static void opencl_thread_shutdown(struct thr_info *thr)
 	const int thr_id = thr->id;
 	_clState *clState = clStates[thr_id];
 
+  applog(LOG_WARNING, "Thread shutdown...\n");
+
+  applog(LOG_WARNING, "1 %d\n", clState->kernel);
 	clReleaseKernel(clState->kernel);
+  applog(LOG_WARNING, "2 %d\n", clState->program);
 	clReleaseProgram(clState->program);
+  applog(LOG_WARNING, "3 %d\n", clState->commandQueue);
 	clReleaseCommandQueue(clState->commandQueue);
+  applog(LOG_WARNING, "4 %d\n", clState->context);
 	clReleaseContext(clState->context);
+  applog(LOG_WARNING, "END\n");
+  clReleaseMemObject(clState->padbuffer8);
+  clReleaseMemObject(clState->CLbuffer0);
+  clReleaseMemObject(clState->outputBuffer);
+}
+
+static bool opencl_thread_reinit(struct thr_info *thr)
+{
+  char name[256];
+  struct timeval now;
+  struct cgpu_info *cgpu = thr->cgpu;
+  int gpu = cgpu->device_id;
+  int virtual_gpu = cgpu->virtual_gpu;
+  int i = thr->id;
+  static bool failmessage = false;
+  int buffersize = BUFFERSIZE;
+
+  if (clStates[i])
+    opencl_thread_shutdown(thr);
+
+  strcpy(name, "");
+  applog(LOG_INFO, "Init GPU thread %i GPU %i virtual GPU %i", i, gpu, virtual_gpu);
+  clStates[i] = initCl(virtual_gpu, name, sizeof(name));
+  if (!clStates[i]) {
+#ifdef HAVE_CURSES
+    if (use_curses)
+      enable_curses();
+#endif
+    applog(LOG_ERR, "Failed to init GPU thread %d, disabling device %d", i, gpu);
+    if (!failmessage) {
+      applog(LOG_ERR, "Restarting the GPU from the menu will not fix this.");
+      applog(LOG_ERR, "Try restarting sgminer.");
+      failmessage = true;
+#ifdef HAVE_CURSES
+      char *buf;
+      if (use_curses) {
+        buf = curses_input("Press enter to continue");
+        if (buf)
+          free(buf);
+      }
+#endif
+    }
+    cgpu->deven = DEV_DISABLED;
+    cgpu->status = LIFE_NOSTART;
+
+    dev_error(cgpu, REASON_DEV_NOSTART);
+
+    return false;
+  }
+  applog(LOG_INFO, "initCl() finished. Found %s", name);
+
+  opencl_thread_init(thr);
+
+  return true;
 }
 
 struct device_drv opencl_drv = {
@@ -1513,6 +1585,7 @@ struct device_drv opencl_drv = {
 	/*.identify_device = */		NULL,
 	/*.set_device = */		NULL,
 
+  /*.thread_reinit = */     opencl_thread_reinit,
 	/*.thread_prepare = */		opencl_thread_prepare,
 	/*.can_limit_work = */		NULL,
 	/*.thread_init = */		opencl_thread_init,
