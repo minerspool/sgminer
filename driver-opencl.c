@@ -1106,6 +1106,8 @@ select_cgpu:
 		cgtime(&thr->sick);
 		if (!pthread_cancel(thr->pth)) {
 			applog(LOG_WARNING, "Thread %d still exists, killing it off", thr_id);
+			pthread_join(thr->pth, NULL);
+			thr->cgpu->drv->thread_shutdown(thr);
 		} else
 			applog(LOG_WARNING, "Thread %d no longer exists", thr_id);
 	}
@@ -1490,10 +1492,15 @@ static void opencl_thread_shutdown(struct thr_info *thr)
 	const int thr_id = thr->id;
 	_clState *clState = clStates[thr_id];
 
-	clReleaseKernel(clState->kernel);
-	clReleaseProgram(clState->program);
-	clReleaseCommandQueue(clState->commandQueue);
-	clReleaseContext(clState->context);
+	if (clState) {
+		clReleaseKernel(clState->kernel);
+		clReleaseProgram(clState->program);
+		clReleaseCommandQueue(clState->commandQueue);
+		clReleaseContext(clState->context);
+		clReleaseMemObject(clState->padbuffer8);
+		clReleaseMemObject(clState->CLbuffer0);
+		clReleaseMemObject(clState->outputBuffer);
+	}
 }
 
 struct device_drv opencl_drv = {
