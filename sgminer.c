@@ -3794,22 +3794,6 @@ void switch_pools(struct pool *selected)
 			break;
 	}
 
-	algo_switch_needed = (last_pool->algorithm != pools[pool_no]->algorithm) ||
-		(last_pool->algorithm_nfactor != pools[pool_no]->algorithm_nfactor);
-
-	if (algo_switch_needed) {
-		rd_lock(&mining_thr_lock);
-		for (i = 0; i < mining_threads; i++) {
-			thr = mining_thr[i];
-			if (!pthread_cancel(thr->pth)) {
-				applog(LOG_WARNING, "Thread %d still exists, killing it off", thr->id);
-				pthread_join(thr->pth, NULL);
-				thr->cgpu->drv->thread_shutdown(thr);
-			}
-		}
-		rd_unlock(&mining_thr_lock);
-	}
-
 	currentpool = pools[pool_no];
 	pool = currentpool;
 	cg_wunlock(&control_lock);
@@ -3826,18 +3810,34 @@ void switch_pools(struct pool *selected)
 			clear_pool_work(last_pool);
 	}
 
-	if (algo_switch_needed) {
-		set_algorithm(algorithm, pool->algorithm);
-		set_algorithm_nfactor(algorithm, pool->algorithm_nfactor);
-		applog(LOG_WARNING, "Changing algorithm to: %s %d", pool->algorithm, pool->algorithm_nfactor);
+	algo_switch_needed = (last_pool->algorithm != pools[pool_no]->algorithm) ||
+		(last_pool->algorithm_nfactor != pools[pool_no]->algorithm_nfactor);
 
-		rd_lock(&mining_thr_lock);
-		for (i = 0; i < mining_threads; i++) {
-			thr = mining_thr[i];
-			reinit_device(thr->cgpu);
-		}
-		rd_unlock(&mining_thr_lock);
-	}
+  if (algo_switch_needed) {
+    rd_lock(&mining_thr_lock);
+    for (i = 0; i < mining_threads; i++) {
+      thr = mining_thr[i];
+      thr->pause = true;
+      while (!thr->paused) {
+        applog(LOG_INFO, "Waiting for thread %d: %d", i, thr->cgpu->rolling);
+        usleep(100000);
+      }
+    }
+
+    set_algorithm(algorithm, pool->algorithm);
+    set_algorithm_nfactor(algorithm, pool->algorithm_nfactor);
+    applog(LOG_WARNING, "Changing algorithm to: %s %d", pool->algorithm, pool->algorithm_nfactor);
+
+    for (i = 0; i < mining_threads; i++) {
+      thr = mining_thr[i];
+      thr->cgpu->drv->thread_shutdown(thr);
+      thr->cgpu->drv->thread_prepare(thr);
+      thr->cgpu->drv->thread_init(thr);
+      thr->pause = false;
+      cgsem_post(&thr->sem);
+    }
+    rd_unlock(&mining_thr_lock);
+  }
 
 	mutex_unlock(&switch_pools_lock);
 
