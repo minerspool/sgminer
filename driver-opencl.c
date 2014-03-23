@@ -1493,13 +1493,15 @@ static void opencl_thread_shutdown(struct thr_info *thr)
 	_clState *clState = clStates[thr_id];
 
 	if (clState) {
+		clFinish(clState->commandQueue);
+		clReleaseMemObject(clState->outputBuffer);
+		clReleaseMemObject(clState->CLbuffer0);
+		clReleaseMemObject(clState->padbuffer8);
 		clReleaseKernel(clState->kernel);
 		clReleaseProgram(clState->program);
 		clReleaseCommandQueue(clState->commandQueue);
 		clReleaseContext(clState->context);
-		clReleaseMemObject(clState->padbuffer8);
-		clReleaseMemObject(clState->CLbuffer0);
-		clReleaseMemObject(clState->outputBuffer);
+		free(clState);
 	}
 }
 

@@ -6285,11 +6285,6 @@ static void hash_sole_work(struct thr_info *mythr)
 
 		if ((strcmp(work->pool->algorithm.name, mythr->algorithm.name) != 0) ||
 		  (work->pool->algorithm.nfactor != mythr->algorithm.nfactor)) {
-		  applog(LOG_WARNING, "%s %d: Switching algorithm from %s %d to %s %d",
-		  	drv->name, cgpu->device_id,
-		  	mythr->algorithm.name, mythr->algorithm.nfactor,
-		  	work->pool->algorithm.name, work->pool->algorithm.nfactor);
-
 			mutex_lock(&algo_switch_lock);
 			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
@@ -6301,6 +6296,11 @@ static void hash_sole_work(struct thr_info *mythr)
 			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 			pthread_testcancel();
 			mutex_unlock(&algo_switch_lock);
+
+		  applog(LOG_WARNING, "%s %d: Switched algorithm from %s %d to %s %d",
+		  	drv->name, cgpu->device_id,
+		  	mythr->algorithm.name, mythr->algorithm.nfactor,
+		  	work->pool->algorithm.name, work->pool->algorithm.nfactor);
 	  }
 
 		mythr->work_restart = false;
