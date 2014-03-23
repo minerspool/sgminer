@@ -480,8 +480,6 @@ struct cgpu_info {
 	int rawintensity;
 	bool dynamic;
 
-	algorithm_t algorithm;
-
 	cl_uint vwidth;
 	size_t work_size;
 	enum cl_kernels kernel;
@@ -576,6 +574,8 @@ struct thr_info {
 
 	bool	work_restart;
 	bool	work_update;
+
+	algorithm_t algorithm;
 };
 
 struct string_elist {

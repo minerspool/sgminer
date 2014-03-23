@@ -3805,7 +3805,6 @@ void switch_pools(struct pool *selected)
 	mutex_lock(&lp_lock);
 	pthread_cond_broadcast(&lp_cond);
 	mutex_unlock(&lp_lock);
-
 }
 
 void discard_work(struct work *work)
@@ -6284,17 +6283,17 @@ static void hash_sole_work(struct thr_info *mythr)
 		struct work *work = get_work(mythr, thr_id);
 		int64_t hashes;
 
-		if ((strcmp(work->pool->algorithm.name, cgpu->algorithm.name) != 0) ||
-		  (work->pool->algorithm.nfactor != cgpu->algorithm.nfactor)) {
+		if ((strcmp(work->pool->algorithm.name, mythr->algorithm.name) != 0) ||
+		  (work->pool->algorithm.nfactor != mythr->algorithm.nfactor)) {
 		  applog(LOG_WARNING, "%s %d: Switching algorithm from %s %d to %s %d",
 		  	drv->name, cgpu->device_id,
-		  	cgpu->algorithm.name, cgpu->algorithm.nfactor,
+		  	mythr->algorithm.name, mythr->algorithm.nfactor,
 		  	work->pool->algorithm.name, work->pool->algorithm.nfactor);
 
 			mutex_lock(&algo_switch_lock);
 			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
-			cgpu->algorithm = work->pool->algorithm;
+			mythr->algorithm = work->pool->algorithm;
 
 	    cgpu->drv->thread_shutdown(mythr);
 	    cgpu->drv->thread_prepare(mythr);
@@ -8156,6 +8155,7 @@ int main(int argc, char *argv[])
 			thr->id = k;
 			thr->cgpu = cgpu;
 			thr->device_thread = j;
+			thr->algorithm = *default_algorithm;
 
 			if (!cgpu->drv->thread_prepare(thr))
 				continue;
