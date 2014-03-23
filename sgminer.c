@@ -6273,6 +6273,7 @@ static void hash_sole_work(struct thr_info *mythr)
 	struct timeval diff, sdiff, wdiff = {0, 0};
 	uint32_t max_nonce = drv->can_limit_work(mythr);
 	int64_t hashes_done = 0;
+	int i;
 
 	tv_end = &getwork_start;
 	cgtime(&getwork_start);
@@ -6288,19 +6289,30 @@ static void hash_sole_work(struct thr_info *mythr)
 			mutex_lock(&algo_switch_lock);
 			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
-			mythr->algorithm = work->pool->algorithm;
-
-	    cgpu->drv->thread_shutdown(mythr);
-	    cgpu->drv->thread_prepare(mythr);
-	    cgpu->drv->thread_init(mythr);
-			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-			pthread_testcancel();
+			rd_lock(&mining_thr_lock);
+			for (i = 0; i < mining_threads; i++) {
+				if (work->pool->algorithm.nfactor == mining_thr[i]->algorithm.nfactor) {
+					rd_unlock(&mining_thr_lock);
+					mutex_unlock(&algo_switch_lock);
+					pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+					pthread_testcancel();
+					sleep(1000); // wait to get cancelled
+				}
+			}
+			for (i = 0; i < mining_threads; i++) {
+				mining_thr[i]->algorithm = work->pool->algorithm;
+				if (mining_thr[i] != mythr) {
+					reinit_device(mining_thr[i]->cgpu);
+				}
+			}
+			rd_unlock(&mining_thr_lock);
 			mutex_unlock(&algo_switch_lock);
 
-		  applog(LOG_WARNING, "%s %d: Switched algorithm from %s %d to %s %d",
-		  	drv->name, cgpu->device_id,
-		  	mythr->algorithm.name, mythr->algorithm.nfactor,
-		  	work->pool->algorithm.name, work->pool->algorithm.nfactor);
+			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+			pthread_testcancel();
+
+			reinit_device(mythr->cgpu);
+			sleep(1000);
 	  }
 
 		mythr->work_restart = false;
