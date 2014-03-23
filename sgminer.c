@@ -98,8 +98,7 @@ int opt_queue = 1;
 int opt_scantime = 7;
 int opt_expiry = 28;
 
-char *opt_algorithm;
-algorithm_t *algorithm;
+algorithm_t *default_algorithm;
 
 static const bool opt_time = true;
 unsigned long long global_hashrate;
@@ -198,6 +197,8 @@ pthread_rwlock_t devices_lock;
 static pthread_mutex_t lp_lock;
 static pthread_cond_t lp_cond;
 
+static pthread_mutex_t algo_switch_lock;
+
 pthread_mutex_t restart_lock;
 pthread_cond_t restart_cond;
 
@@ -210,6 +211,7 @@ static struct timeval total_tv_start, total_tv_end;
 cglock_t control_lock;
 pthread_mutex_t stats_lock;
 
+static int algo_switch_n = 0;
 int hw_errors;
 int total_accepted, total_rejected, total_diff1;
 int total_getworks, total_stale, total_discarded;
@@ -535,6 +537,9 @@ struct pool *add_pool(void)
 	sprintf(buf, "", pool->pool_no);
 	pool->name = strdup(buf);
 
+  /* Algorithm */
+  pool->algorithm = *default_algorithm;
+
 	pools = (struct pool **)realloc(pools, sizeof(struct pool *) * (total_pools + 2));
 	pools[total_pools++] = pool;
 	mutex_init(&pool->pool_lock);
@@ -749,6 +754,35 @@ static char *set_url(char *arg)
 	struct pool *pool = add_url();
 
 	setup_url(pool, arg);
+	return NULL;
+}
+
+
+static char *set_pool_algorithm(char *arg)
+{
+	struct pool *pool;
+
+	while ((json_array_index + 1) > total_pools)
+		add_pool();
+	pool = pools[json_array_index];
+
+	applog(LOG_DEBUG, "Setting pool %i algorithm to %s", pool->pool_no, arg);
+	set_algorithm(&pool->algorithm, arg);
+
+	return NULL;
+}
+
+static char *set_pool_nfactor(char *arg)
+{
+	struct pool *pool;
+
+	while ((json_array_index + 1) > total_pools)
+		add_pool();
+	pool = pools[json_array_index];
+
+	applog(LOG_DEBUG, "Setting pool %i N-factor to %s", pool->pool_no, arg);
+	set_algorithm_nfactor(&pool->algorithm, (const uint8_t) atoi(arg));
+
 	return NULL;
 }
 
@@ -1023,17 +1057,17 @@ static void load_temp_cutoffs()
 
 static char *set_algo(const char *arg)
 {
-	set_algorithm(algorithm, arg);
-	applog(LOG_INFO, "Set algorithm to %s", algorithm->name);
+	set_algorithm(default_algorithm, arg);
+	applog(LOG_INFO, "Set default algorithm to %s", default_algorithm->name);
 
 	return NULL;
 }
 
 static char *set_nfactor(const char *arg)
 {
-	set_algorithm_nfactor(algorithm, (uint8_t)atoi(arg));
+	set_algorithm_nfactor(default_algorithm, (const uint8_t) atoi(arg));
 	applog(LOG_INFO, "Set algorithm N-factor to %d (N to %d)",
-	       algorithm->nfactor, algorithm->n);
+	       default_algorithm->nfactor, default_algorithm->n);
 
 	return NULL;
 }
@@ -1379,6 +1413,12 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--url|-o",
 		     set_url, NULL, NULL,
 		     "URL for bitcoin JSON-RPC server"),
+	OPT_WITH_ARG("--pool-algorithm",
+				 set_pool_algorithm, NULL, NULL,
+				 "Set algorithm for pool"),
+	OPT_WITH_ARG("--pool-nfactor",
+				 set_pool_nfactor, NULL, NULL,
+         "Set N-factor for pool"),
 	OPT_WITH_ARG("--user|-u",
 		     set_user, NULL, NULL,
 		     "Username for bitcoin JSON-RPC server"),
@@ -3766,7 +3806,6 @@ void switch_pools(struct pool *selected)
 	mutex_lock(&lp_lock);
 	pthread_cond_broadcast(&lp_cond);
 	mutex_unlock(&lp_lock);
-
 }
 
 void discard_work(struct work *work)
@@ -6083,7 +6122,7 @@ static void rebuild_nonce(struct work *work, uint32_t nonce)
 
 	*work_nonce = htole32(nonce);
 
-	scrypt_regenhash(work);
+	scrypt_regenhash(work, work->pool->algorithm.n);
 }
 
 /* For testing a nonce against diff 1 */
@@ -6211,8 +6250,10 @@ static void mt_disable(struct thr_info *mythr, const int thr_id,
 	applog(LOG_WARNING, "Thread %d being disabled", thr_id);
 	mythr->rolling = mythr->cgpu->rolling = 0;
 	applog(LOG_DEBUG, "Waiting on sem in miner thread");
+	mythr->paused = true;
 	cgsem_wait(&mythr->sem);
 	applog(LOG_WARNING, "Thread %d being re-enabled", thr_id);
+	mythr->paused = false;
 	drv->thread_enable(mythr);
 }
 
@@ -6242,6 +6283,39 @@ static void hash_sole_work(struct thr_info *mythr)
 	while (likely(!cgpu->shutdown)) {
 		struct work *work = get_work(mythr, thr_id);
 		int64_t hashes;
+
+		if ((strcmp(work->pool->algorithm.name, mythr->algorithm.name) != 0) ||
+		  (work->pool->algorithm.nfactor != mythr->algorithm.nfactor)) {
+			mutex_lock(&algo_switch_lock);
+			algo_switch_n++;
+			mutex_unlock(&algo_switch_lock);
+
+			while (algo_switch_n != mining_threads) usleep(100000);
+
+			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+
+			mythr->algorithm = work->pool->algorithm;
+
+	    cgpu->drv->thread_shutdown(mythr);
+			mutex_lock(&algo_switch_lock);
+	    cgpu->drv->thread_prepare(mythr);
+			mutex_unlock(&algo_switch_lock);
+	    cgpu->drv->thread_init(mythr);
+			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+			pthread_testcancel();
+
+		  applog(LOG_WARNING, "%s %d: Switched algorithm from %s %d to %s %d",
+		  	drv->name, cgpu->device_id,
+		  	mythr->algorithm.name, mythr->algorithm.nfactor,
+		  	work->pool->algorithm.name, work->pool->algorithm.nfactor);
+
+		  usleep(150000);
+			mutex_lock(&algo_switch_lock);
+			algo_switch_n--;
+			mutex_unlock(&algo_switch_lock);
+
+			while (algo_switch_n > 0) usleep(100000);
+	  }
 
 		mythr->work_restart = false;
 		cgpu->new_work = true;
@@ -7177,7 +7251,7 @@ static void *watchdog_thread(void __maybe_unused *userdata)
 					temp, fanpercent, fanspeed, engineclock, memclock, vddc, activity, powertune);
 			}
 #endif
-			
+
 			/* Thread is waiting on getwork or disabled */
 			if (thr->getwork || *denable == DEV_DISABLED)
 				continue;
@@ -7740,7 +7814,7 @@ bool add_cgpu(struct cgpu_info *cgpu)
 {
 	static struct _cgpu_devid_counter *devids = NULL;
 	struct _cgpu_devid_counter *d;
-	
+
 	HASH_FIND_STR(devids, cgpu->drv->name, d);
 	if (d)
 		cgpu->device_id = ++d->lastid;
@@ -7836,6 +7910,7 @@ int main(int argc, char *argv[])
 	rwlock_init(&devices_lock);
 
 	mutex_init(&lp_lock);
+	mutex_init(&algo_switch_lock);
 	if (unlikely(pthread_cond_init(&lp_cond, NULL)))
 		quit(1, "Failed to pthread_cond_init lp_cond");
 
@@ -7886,8 +7961,8 @@ int main(int argc, char *argv[])
 #endif
 
 	/* Default algorithm specified in algorithm.c ATM */
-	algorithm = (algorithm_t *)alloca(sizeof(algorithm_t));
-	set_algorithm(algorithm, "scrypt");
+	default_algorithm = (algorithm_t *)alloca(sizeof(algorithm_t));
+	set_algorithm(default_algorithm, "scrypt");
 
 	devcursor = 8;
 	logstart = devcursor + 1;
@@ -8094,6 +8169,7 @@ int main(int argc, char *argv[])
 			thr->id = k;
 			thr->cgpu = cgpu;
 			thr->device_thread = j;
+			thr->algorithm = *default_algorithm;
 
 			if (!cgpu->drv->thread_prepare(thr))
 				continue;
@@ -8183,7 +8259,7 @@ begin_bench:
 
 		cgpu->rolling = cgpu->total_mhashes = 0;
 	}
-	
+
 	cgtime(&total_tv_start);
 	cgtime(&total_tv_end);
 	get_datestamp(datestamp, sizeof(datestamp), &total_tv_start);
