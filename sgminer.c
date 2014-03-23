@@ -98,8 +98,7 @@ int opt_queue = 1;
 int opt_scantime = 7;
 int opt_expiry = 28;
 
-char *opt_algorithm;
-algorithm_t *algorithm;
+algorithm_t *default_algorithm;
 
 static const bool opt_time = true;
 unsigned long long global_hashrate;
@@ -535,6 +534,9 @@ struct pool *add_pool(void)
 	sprintf(buf, "", pool->pool_no);
 	pool->name = strdup(buf);
 
+	/* Algorithm */
+	pool->algorithm = *default_algorithm;
+
 	pools = (struct pool **)realloc(pools, sizeof(struct pool *) * (total_pools + 2));
 	pools[total_pools++] = pool;
 	mutex_init(&pool->pool_lock);
@@ -749,6 +751,35 @@ static char *set_url(char *arg)
 	struct pool *pool = add_url();
 
 	setup_url(pool, arg);
+	return NULL;
+}
+
+
+static char *set_pool_algorithm(char *arg)
+{
+	struct pool *pool;
+
+	while ((json_array_index + 1) > total_pools)
+		add_pool();
+	pool = pools[json_array_index];
+
+	applog(LOG_DEBUG, "Setting pool %i algorithm to %s", pool->pool_no, arg);
+	set_algorithm(&pool->algorithm, arg);
+
+	return NULL;
+}
+
+static char *set_pool_nfactor(char *arg)
+{
+	struct pool *pool;
+
+	while ((json_array_index + 1) > total_pools)
+		add_pool();
+	pool = pools[json_array_index];
+
+	applog(LOG_DEBUG, "Setting pool %i N-factor to %s", pool->pool_no, arg);
+	set_algorithm_nfactor(&pool->algorithm, (const uint8_t) atoi(arg));
+
 	return NULL;
 }
 
@@ -1023,17 +1054,17 @@ static void load_temp_cutoffs()
 
 static char *set_algo(const char *arg)
 {
-	set_algorithm(algorithm, arg);
-	applog(LOG_INFO, "Set algorithm to %s", algorithm->name);
+	set_algorithm(default_algorithm, arg);
+	applog(LOG_INFO, "Set default algorithm to %s", default_algorithm->name);
 
 	return NULL;
 }
 
 static char *set_nfactor(const char *arg)
 {
-	set_algorithm_nfactor(algorithm, (uint8_t)atoi(arg));
+	set_algorithm_nfactor(default_algorithm, (const uint8_t) atoi(arg));
 	applog(LOG_INFO, "Set algorithm N-factor to %d (N to %d)",
-	       algorithm->nfactor, algorithm->n);
+	       default_algorithm->nfactor, default_algorithm->n);
 
 	return NULL;
 }
@@ -1379,6 +1410,12 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--url|-o",
 		     set_url, NULL, NULL,
 		     "URL for bitcoin JSON-RPC server"),
+	OPT_WITH_ARG("--pool-algorithm",
+				 set_pool_algorithm, NULL, NULL,
+				 "Set algorithm for pool"),
+	OPT_WITH_ARG("--pool-nfactor",
+				 set_pool_nfactor, NULL, NULL,
+         "Set N-factor for pool"),
 	OPT_WITH_ARG("--user|-u",
 		     set_user, NULL, NULL,
 		     "Username for bitcoin JSON-RPC server"),
@@ -3766,7 +3803,6 @@ void switch_pools(struct pool *selected)
 	mutex_lock(&lp_lock);
 	pthread_cond_broadcast(&lp_cond);
 	mutex_unlock(&lp_lock);
-
 }
 
 void discard_work(struct work *work)
@@ -5987,6 +6023,34 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	cgtime(&work->tv_staged);
 }
 
+static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
+{
+	if (mythr->device_thread == 0) {
+		struct cgpu_info *cgpu = mythr->cgpu;
+		if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
+			// stage work back to queue, we cannot process it yet
+			stage_work(work);
+
+			// we will exit shortly
+			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+
+			// switch algorithm
+			applog(LOG_WARNING, "%s %d: Switching algorithm from %s (%d) to %s (%d)",
+				cgpu->drv->name, cgpu->device_id,
+				cgpu->algorithm.name, cgpu->algorithm.nfactor,
+				work->pool->algorithm.name, work->pool->algorithm.nfactor);
+
+			cgpu->algorithm = work->pool->algorithm;
+
+			// cleanup and queue reinit of the GPU, then exit
+			cgpu->drv->thread_shutdown(mythr);
+
+			reinit_device(cgpu);
+			pthread_exit(NULL);
+		}
+	}
+}
+
 struct work *get_work(struct thr_info *thr, const int thr_id)
 {
 	struct work *work = NULL;
@@ -6003,6 +6067,9 @@ struct work *get_work(struct thr_info *thr, const int thr_id)
 			wake_gws();
 		}
 	}
+
+	get_work_prepare_thread(thr, work);
+
 	diff_t = time(NULL) - diff_t;
 	/* Since this is a blocking function, we need to add grace time to
 	 * the device's last valid work to not make outages appear to be
@@ -6083,7 +6150,7 @@ static void rebuild_nonce(struct work *work, uint32_t nonce)
 
 	*work_nonce = htole32(nonce);
 
-	scrypt_regenhash(work);
+	scrypt_regenhash(work, work->pool->algorithm.n);
 }
 
 /* For testing a nonce against diff 1 */
@@ -6211,8 +6278,10 @@ static void mt_disable(struct thr_info *mythr, const int thr_id,
 	applog(LOG_WARNING, "Thread %d being disabled", thr_id);
 	mythr->rolling = mythr->cgpu->rolling = 0;
 	applog(LOG_DEBUG, "Waiting on sem in miner thread");
+	mythr->paused = true;
 	cgsem_wait(&mythr->sem);
 	applog(LOG_WARNING, "Thread %d being re-enabled", thr_id);
+	mythr->paused = false;
 	drv->thread_enable(mythr);
 }
 
@@ -6229,7 +6298,7 @@ static void hash_sole_work(struct thr_info *mythr)
 	struct sgminer_stats *pool_stats;
 	/* Try to cycle approximately 5 times before each log update */
 	const long cycle = opt_log_interval / 5 ? 5 : 1;
-	const bool primary = (!mythr->device_thread) || mythr->primary_thread;
+	const bool primary = mythr->device_thread == 0;
 	struct timeval diff, sdiff, wdiff = {0, 0};
 	uint32_t max_nonce = drv->can_limit_work(mythr);
 	int64_t hashes_done = 0;
@@ -7177,7 +7246,7 @@ static void *watchdog_thread(void __maybe_unused *userdata)
 					temp, fanpercent, fanspeed, engineclock, memclock, vddc, activity, powertune);
 			}
 #endif
-			
+
 			/* Thread is waiting on getwork or disabled */
 			if (thr->getwork || *denable == DEV_DISABLED)
 				continue;
@@ -7740,7 +7809,7 @@ bool add_cgpu(struct cgpu_info *cgpu)
 {
 	static struct _cgpu_devid_counter *devids = NULL;
 	struct _cgpu_devid_counter *d;
-	
+
 	HASH_FIND_STR(devids, cgpu->drv->name, d);
 	if (d)
 		cgpu->device_id = ++d->lastid;
@@ -7886,8 +7955,8 @@ int main(int argc, char *argv[])
 #endif
 
 	/* Default algorithm specified in algorithm.c ATM */
-	algorithm = (algorithm_t *)alloca(sizeof(algorithm_t));
-	set_algorithm(algorithm, "scrypt");
+	default_algorithm = (algorithm_t *)alloca(sizeof(algorithm_t));
+	set_algorithm(default_algorithm, "scrypt");
 
 	devcursor = 8;
 	logstart = devcursor + 1;
@@ -8183,7 +8252,7 @@ begin_bench:
 
 		cgpu->rolling = cgpu->total_mhashes = 0;
 	}
-	
+
 	cgtime(&total_tv_start);
 	cgtime(&total_tv_end);
 	get_datestamp(datestamp, sizeof(datestamp), &total_tv_start);
