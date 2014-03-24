@@ -197,7 +197,8 @@ pthread_rwlock_t devices_lock;
 static pthread_mutex_t lp_lock;
 static pthread_cond_t lp_cond;
 
-static pthread_rwlock_t algo_switch_lock;
+static pthread_mutex_t algo_check_lock;
+static pthread_mutex_t algo_switch_lock;
 
 pthread_mutex_t restart_lock;
 pthread_cond_t restart_cond;
@@ -6032,6 +6033,8 @@ static void *switch_algo_thread(void *arg)
 
 	pthread_detach(pthread_self());
 
+  mutex_lock(&algo_switch_lock);
+
 	applog(LOG_WARNING, "Switching algorithm to %s (%d)",
 		new_algo->name, new_algo->nfactor);
 
@@ -6055,7 +6058,7 @@ static void *switch_algo_thread(void *arg)
     usleep(50000);
   }
 	
-	wr_unlock(&algo_switch_lock);
+  mutex_unlock(&algo_switch_lock);
 
 	return NULL;
 }
@@ -6064,7 +6067,8 @@ static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 {
 	struct cgpu_info *cgpu = mythr->cgpu;
 	
-	wr_lock(&algo_switch_lock);
+  mutex_lock(&algo_check_lock);
+  mutex_lock(&algo_switch_lock);
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 	if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
 		pthread_t switch_algo_thr;
@@ -6073,13 +6077,16 @@ static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 
 		pthread_create(&switch_algo_thr, NULL, &switch_algo_thread, &work->pool->algorithm);
 		
+    mutex_unlock(&algo_switch_lock);
+    while (mutex_trylock(&algo_switch_lock) == 0) mutex_unlock(&algo_switch_lock);
+    mutex_unlock(&algo_check_lock);
 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 		pthread_testcancel();
-		sleep(60);
-		applog(LOG_ERR, "Thread not canceled within 60 seconds");
-    wr_unlock(&algo_switch_lock);
-	} else
-		wr_unlock(&algo_switch_lock);
+    sleep(60);
+    applog(LOG_ERR, "Thread not canceled within 60 seconds");
+	}
+  mutex_unlock(&algo_switch_lock);
+  mutex_unlock(&algo_check_lock);
 
 	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 	pthread_testcancel();
@@ -7937,7 +7944,8 @@ int main(int argc, char *argv[])
 	rwlock_init(&netacc_lock);
 	rwlock_init(&mining_thr_lock);
 	rwlock_init(&devices_lock);
-	rwlock_init(&algo_switch_lock);
+  mutex_init(&algo_check_lock);
+  mutex_init(&algo_switch_lock);
 
 	mutex_init(&lp_lock);
 	if (unlikely(pthread_cond_init(&lp_cond, NULL)))
