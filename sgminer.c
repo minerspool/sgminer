@@ -197,8 +197,8 @@ pthread_rwlock_t devices_lock;
 static pthread_mutex_t lp_lock;
 static pthread_cond_t lp_cond;
 
-static pthread_mutex_t algo_check_lock;
 static pthread_mutex_t algo_switch_lock;
+static pthread_t algo_switch_thr = 0;
 
 pthread_mutex_t restart_lock;
 pthread_cond_t restart_cond;
@@ -6033,8 +6033,6 @@ static void *switch_algo_thread(void *arg)
 
 	pthread_detach(pthread_self());
 
-  mutex_lock(&algo_switch_lock);
-
 	applog(LOG_WARNING, "Switching algorithm to %s (%d)",
 		new_algo->name, new_algo->nfactor);
 
@@ -6057,7 +6055,9 @@ static void *switch_algo_thread(void *arg)
     if (stop) break;
     usleep(50000);
   }
-	
+
+  mutex_lock(&algo_switch_lock);
+	algo_switch_thr = 0;
   mutex_unlock(&algo_switch_lock);
 
 	return NULL;
@@ -6067,29 +6067,21 @@ static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 {
 	struct cgpu_info *cgpu = mythr->cgpu;
 	
-  mutex_lock(&algo_check_lock);
   mutex_lock(&algo_switch_lock);
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
-		pthread_t switch_algo_thr;
+	if ((algo_switch_thr != 0) || !cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
 		// stage work back to queue, we cannot process it yet
 		stage_work(work);
 
-		pthread_create(&switch_algo_thr, NULL, &switch_algo_thread, &work->pool->algorithm);
+    if (algo_switch_thr == 0)
+      pthread_create(&algo_switch_thr, NULL, &switch_algo_thread, &work->pool->algorithm);
 		
     mutex_unlock(&algo_switch_lock);
-    while (mutex_trylock(&algo_switch_lock) == 0) mutex_unlock(&algo_switch_lock);
-    mutex_unlock(&algo_check_lock);
 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-		pthread_testcancel();
     sleep(60);
     applog(LOG_ERR, "Thread not canceled within 60 seconds");
-	}
-  mutex_unlock(&algo_switch_lock);
-  mutex_unlock(&algo_check_lock);
-
-	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-	pthread_testcancel();
+	} else
+    mutex_unlock(&algo_switch_lock);
 }
 
 struct work *get_work(struct thr_info *thr, const int thr_id)
@@ -7944,7 +7936,6 @@ int main(int argc, char *argv[])
 	rwlock_init(&netacc_lock);
 	rwlock_init(&mining_thr_lock);
 	rwlock_init(&devices_lock);
-  mutex_init(&algo_check_lock);
   mutex_init(&algo_switch_lock);
 
 	mutex_init(&lp_lock);
