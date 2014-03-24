@@ -6025,16 +6025,15 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	cgtime(&work->tv_staged);
 }
 
-static void thread_prepare_for_work(struct thr_info *mythr, struct work *work)
+static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 {
-	mutex_lock(&algo_switch_lock);
-	if (!cmp_algorithm(&work->pool->algorithm, &mythr->algorithm)) {
+	if ((mythr->device_thread == 0) && !cmp_algorithm(&work->pool->algorithm, &mythr->algorithm)) {
     int i;
-    
-    // push work back to queue, we cannot process it yet
-    hash_push(work);
 
-    // we will cancel ourself shortly
+    // stage work back to queue, we cannot process it yet
+    stage_work(work);
+
+    // we will exit shortly
     pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
     // switch algorithm
@@ -6050,11 +6049,6 @@ static void thread_prepare_for_work(struct thr_info *mythr, struct work *work)
 		for (i = 0; i < mythr->cgpu->threads; i++) {
       struct thr_info *thr = mythr->cgpu->thr[i];
 
-      if ((thr != mythr) && !pthread_cancel(thr->pth)) {
-        pthread_join(thr->pth, NULL);
-        thr->cgpu->drv->thread_shutdown(thr);
-      }
-
       thr->algorithm = work->pool->algorithm;
     }
 
@@ -6065,8 +6059,6 @@ static void thread_prepare_for_work(struct thr_info *mythr, struct work *work)
 
     reinit_device(mythr->cgpu);
     pthread_exit(NULL);
-  } else {
-		mutex_unlock(&algo_switch_lock);
   }
 }
 
@@ -6087,7 +6079,7 @@ struct work *get_work(struct thr_info *thr, const int thr_id)
 		}
 	}
 
-	thread_prepare_for_work(thr, work);
+	get_work_prepare_thread(thr, work);
 
 	diff_t = time(NULL) - diff_t;
 	/* Since this is a blocking function, we need to add grace time to
@@ -6317,7 +6309,7 @@ static void hash_sole_work(struct thr_info *mythr)
 	struct sgminer_stats *pool_stats;
 	/* Try to cycle approximately 5 times before each log update */
 	const long cycle = opt_log_interval / 5 ? 5 : 1;
-	const bool primary = (!mythr->device_thread) || mythr->primary_thread;
+	const bool primary = mythr->device_thread == 0;
 	struct timeval diff, sdiff, wdiff = {0, 0};
 	uint32_t max_nonce = drv->can_limit_work(mythr);
 	int64_t hashes_done = 0;

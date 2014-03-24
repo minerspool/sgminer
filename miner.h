@@ -557,7 +557,6 @@ struct thread_q {
 struct thr_info {
 	int		id;
 	int		device_thread;
-	bool		primary_thread;
 
 	pthread_t	pth;
 	cgsem_t		sem;
