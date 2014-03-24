@@ -197,6 +197,8 @@ pthread_rwlock_t devices_lock;
 static pthread_mutex_t lp_lock;
 static pthread_cond_t lp_cond;
 
+static pthread_rwlock_t algo_switch_lock;
+
 pthread_mutex_t restart_lock;
 pthread_cond_t restart_cond;
 
@@ -6023,32 +6025,64 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	cgtime(&work->tv_staged);
 }
 
+static void *switch_algo_thread(void *arg)
+{
+	algorithm_t *new_algo = (algorithm_t *) arg;
+  int i;
+
+	pthread_detach(pthread_self());
+
+	applog(LOG_WARNING, "Switching algorithm to %s (%d)",
+		new_algo->name, new_algo->nfactor);
+
+	// TODO: When threads are canceled, they may leak memory, for example
+	// the "work" variable in get_work.
+	rd_lock(&devices_lock);
+	for (i = 0; i < total_devices; i++) {
+		devices[i]->algorithm = *new_algo;
+		reinit_device(devices[i]);
+	}
+	rd_unlock(&devices_lock);
+
+  // Wait for reinit_gpu to finish
+  while (42) {
+    struct thread_q *tq = control_thr[gpur_thr_id].q;
+    bool stop = false;
+    mutex_lock(&tq->mutex);
+    stop = list_empty(&tq->q);
+    mutex_unlock(&tq->mutex);
+    if (stop) break;
+    usleep(50000);
+  }
+	
+	wr_unlock(&algo_switch_lock);
+
+	return NULL;
+}
+
 static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 {
-	if (mythr->device_thread == 0) {
-		struct cgpu_info *cgpu = mythr->cgpu;
-		if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
-			// stage work back to queue, we cannot process it yet
-			stage_work(work);
+	struct cgpu_info *cgpu = mythr->cgpu;
+	
+	wr_lock(&algo_switch_lock);
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
+		pthread_t switch_algo_thr;
+		// stage work back to queue, we cannot process it yet
+		stage_work(work);
 
-			// we will exit shortly
-			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+		pthread_create(&switch_algo_thr, NULL, &switch_algo_thread, &work->pool->algorithm);
+		
+		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+		pthread_testcancel();
+		sleep(60);
+		applog(LOG_ERR, "Thread not canceled within 60 seconds");
+    wr_unlock(&algo_switch_lock);
+	} else
+		wr_unlock(&algo_switch_lock);
 
-			// switch algorithm
-			applog(LOG_WARNING, "%s %d: Switching algorithm from %s (%d) to %s (%d)",
-				cgpu->drv->name, cgpu->device_id,
-				cgpu->algorithm.name, cgpu->algorithm.nfactor,
-				work->pool->algorithm.name, work->pool->algorithm.nfactor);
-
-			cgpu->algorithm = work->pool->algorithm;
-
-			// cleanup and queue reinit of the GPU, then exit
-			cgpu->drv->thread_shutdown(mythr);
-
-			reinit_device(cgpu);
-			pthread_exit(NULL);
-		}
-	}
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+	pthread_testcancel();
 }
 
 struct work *get_work(struct thr_info *thr, const int thr_id)
@@ -7903,6 +7937,7 @@ int main(int argc, char *argv[])
 	rwlock_init(&netacc_lock);
 	rwlock_init(&mining_thr_lock);
 	rwlock_init(&devices_lock);
+	rwlock_init(&algo_switch_lock);
 
 	mutex_init(&lp_lock);
 	if (unlikely(pthread_cond_init(&lp_cond, NULL)))
