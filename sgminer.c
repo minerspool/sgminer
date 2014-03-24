@@ -197,6 +197,8 @@ pthread_rwlock_t devices_lock;
 static pthread_mutex_t lp_lock;
 static pthread_cond_t lp_cond;
 
+static pthread_mutex_t algo_switch_lock;
+
 pthread_mutex_t restart_lock;
 pthread_cond_t restart_cond;
 
@@ -6025,38 +6027,50 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 
 static bool check_work_algorithm(struct thr_info *mythr, struct work *work)
 {
-	struct cgpu_info *cgpu = mythr->cgpu;
-	bool same_algo;
+	int i;
 
-	cg_rlock(&control_lock);
-	same_algo = cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm);
-	cg_runlock(&control_lock);
-	if (mythr->device_thread == 0) {
-		if (!same_algo) {
-			// stage work back to queue, we cannot process it yet
-			stage_work(work);
+  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+  if (mutex_trylock(&algo_switch_lock) == 0) {
+    if (!cmp_algorithm(&work->pool->algorithm, &mythr->cgpu->algorithm)) {
+      struct thr_info *thr;
 
-			// we will exit shortly
-			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+      stage_work(work);
 
-			// switch algorithm
-			applog(LOG_WARNING, "%s %d: Switching algorithm from %s (%d) to %s (%d)",
-				cgpu->drv->name, cgpu->device_id,
-				cgpu->algorithm.name, cgpu->algorithm.nfactor,
-				work->pool->algorithm.name, work->pool->algorithm.nfactor);
+      for (i = 0; i < mining_threads; i++) {
+        thr = mining_thr[i];
 
-			cg_wlock(&control_lock);
-			cgpu->algorithm = work->pool->algorithm;
-			cg_wunlock(&control_lock);
+        if ((thr != mythr) && !pthread_cancel(thr->pth)) {
+          pthread_join(thr->pth, NULL);
+          thr->cgpu->drv->thread_shutdown(thr);
+        }
+      }
 
-			// cleanup and queue reinit of the GPU, then exit
-			cgpu->drv->thread_shutdown(mythr);
+      mutex_unlock(&algo_switch_lock);
 
-			reinit_device(cgpu);
-			pthread_exit(NULL);
-		}
-	}
-	return same_algo;
+      applog(LOG_WARNING, "Switching algorithm from %s (%d) to %s (%d)",
+        mythr->cgpu->algorithm.name, mythr->cgpu->algorithm.nfactor,
+        work->pool->algorithm.name, work->pool->algorithm.nfactor);
+
+      rd_lock(&devices_lock);
+      for (i = 0; i < total_devices; i++) {
+        devices[i]->algorithm = work->pool->algorithm;
+        reinit_device(devices[i]);
+      }
+      rd_unlock(&devices_lock);
+
+      pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+      sleep(60);
+      applog(LOG_ERR, "Thread was not canceled in 60 seconds");
+    } else
+      mutex_unlock(&algo_switch_lock);
+  } else {
+    // Algorithm switch in progress, push work back and let us be canceled
+    stage_work(work);
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    sleep(60);
+    applog(LOG_ERR, "Thread was not canceled in 60 seconds");
+  }
+  pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 }
 
 struct work *get_work(struct thr_info *thr, const int thr_id)
@@ -6069,14 +6083,14 @@ struct work *get_work(struct thr_info *thr, const int thr_id)
 	diff_t = time(NULL);
 	while (!work) {
 		work = hash_pop(true);
-		if (stale_work(work, false) || !check_work_algorithm(thr, work)) {
+		if (stale_work(work, false)) {
 			discard_work(work);
 			work = NULL;
 			wake_gws();
 		}
 	}
 
-	;
+	check_work_algorithm(thr, work);
 
 	diff_t = time(NULL) - diff_t;
 	/* Since this is a blocking function, we need to add grace time to
