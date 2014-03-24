@@ -6033,8 +6033,6 @@ static void *switch_algo_thread(void *arg)
 
 	pthread_detach(pthread_self());
 
-	mutex_lock(&algo_switch_lock);
-
 	applog(LOG_WARNING, "Switching algorithm to %s (%d)",
 		new_algo->name, new_algo->nfactor);
 
@@ -6058,10 +6056,19 @@ static void *switch_algo_thread(void *arg)
 		usleep(50000);
 	}
 
+	mutex_lock(&algo_switch_lock);
 	algo_switch_thr = 0;
 	mutex_unlock(&algo_switch_lock);
 
 	return NULL;
+}
+
+static void wait_to_die(void)
+{
+	mutex_unlock(&algo_switch_lock);
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+	sleep(60);
+	applog(LOG_ERR, "Thread not canceled within 60 seconds");
 }
 
 static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
@@ -6070,17 +6077,12 @@ static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 	
 	mutex_lock(&algo_switch_lock);
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	if ((algo_switch_thr != 0) || !cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
+	if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
 		// stage work back to queue, we cannot process it yet
 		stage_work(work);
-
 		if (algo_switch_thr == 0)
 			pthread_create(&algo_switch_thr, NULL, &switch_algo_thread, &work->pool->algorithm);
-		
-		mutex_unlock(&algo_switch_lock);
-		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-		sleep(60);
-		applog(LOG_ERR, "Thread not canceled within 60 seconds");
+		wait_to_die();
 	} else {
 		mutex_unlock(&algo_switch_lock);
 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
