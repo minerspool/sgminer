@@ -6023,11 +6023,16 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	cgtime(&work->tv_staged);
 }
 
-static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
+static bool check_work_algorithm(struct thr_info *mythr, struct work *work)
 {
+	struct cgpu_info *cgpu = mythr->cgpu;
+	bool same_algo;
+
+	cg_rlock(&control_lock);
+	same_algo = cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm);
+	cg_runlock(&control_lock);
 	if (mythr->device_thread == 0) {
-		struct cgpu_info *cgpu = mythr->cgpu;
-		if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
+		if (!same_algo) {
 			// stage work back to queue, we cannot process it yet
 			stage_work(work);
 
@@ -6040,7 +6045,9 @@ static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 				cgpu->algorithm.name, cgpu->algorithm.nfactor,
 				work->pool->algorithm.name, work->pool->algorithm.nfactor);
 
+			cg_wlock(&control_lock);
 			cgpu->algorithm = work->pool->algorithm;
+			cg_wunlock(&control_lock);
 
 			// cleanup and queue reinit of the GPU, then exit
 			cgpu->drv->thread_shutdown(mythr);
@@ -6049,6 +6056,7 @@ static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 			pthread_exit(NULL);
 		}
 	}
+	return same_algo;
 }
 
 struct work *get_work(struct thr_info *thr, const int thr_id)
@@ -6061,14 +6069,14 @@ struct work *get_work(struct thr_info *thr, const int thr_id)
 	diff_t = time(NULL);
 	while (!work) {
 		work = hash_pop(true);
-		if (stale_work(work, false)) {
+		if (stale_work(work, false) || !check_work_algorithm(thr, work)) {
 			discard_work(work);
 			work = NULL;
 			wake_gws();
 		}
 	}
 
-	get_work_prepare_thread(thr, work);
+	;
 
 	diff_t = time(NULL) - diff_t;
 	/* Since this is a blocking function, we need to add grace time to
