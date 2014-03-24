@@ -197,8 +197,6 @@ pthread_rwlock_t devices_lock;
 static pthread_mutex_t lp_lock;
 static pthread_cond_t lp_cond;
 
-static pthread_mutex_t algo_switch_lock;
-
 pthread_mutex_t restart_lock;
 pthread_cond_t restart_cond;
 
@@ -6027,38 +6025,29 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 
 static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
 {
-	if ((mythr->device_thread == 0) && !cmp_algorithm(&work->pool->algorithm, &mythr->algorithm)) {
-    int i;
+	if (mythr->device_thread == 0) {
+    struct cgpu_info *cgpu = mythr->cgpu;
+    if (!cmp_algorithm(&work->pool->algorithm, &cgpu->algorithm)) {
+      // stage work back to queue, we cannot process it yet
+      stage_work(work);
 
-    // stage work back to queue, we cannot process it yet
-    stage_work(work);
+      // we will exit shortly
+      pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
-    // we will exit shortly
-    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+      // switch algorithm
+  	  applog(LOG_WARNING, "%s %d: Switching algorithm from %s (%d) to %s (%d)",
+  	  	cgpu->drv->name, cgpu->device_id,
+  	  	cgpu->algorithm.name, cgpu->algorithm.nfactor,
+  	  	work->pool->algorithm.name, work->pool->algorithm.nfactor);
 
-    // switch algorithm
-	  applog(LOG_WARNING, "%s %d: Switching algorithm from %s (%d) to %s (%d)",
-	  	mythr->cgpu->drv->name, mythr->cgpu->device_id,
-	  	mythr->algorithm.name, mythr->algorithm.nfactor,
-	  	work->pool->algorithm.name, work->pool->algorithm.nfactor);
+      cgpu->algorithm = work->pool->algorithm;
 
-    // cancel the other threads on this GPU, so they do not keep running
-    // with the old algorithm after we release algo_switch_lock
-    // this also ensures that the other threads do not lock algo_switch_lock
-    // and then get canceled before unlocking it
-		for (i = 0; i < mythr->cgpu->threads; i++) {
-      struct thr_info *thr = mythr->cgpu->thr[i];
+      // cleanup and queue reinit of the GPU, then exit
+      cgpu->drv->thread_shutdown(mythr);
 
-      thr->algorithm = work->pool->algorithm;
+      reinit_device(cgpu);
+      pthread_exit(NULL);
     }
-
-    mutex_unlock(&algo_switch_lock);
-
-    // cleanup and queue reinit of the GPU, then exit
-    mythr->cgpu->drv->thread_shutdown(mythr);
-
-    reinit_device(mythr->cgpu);
-    pthread_exit(NULL);
   }
 }
 
@@ -7916,7 +7905,6 @@ int main(int argc, char *argv[])
 	rwlock_init(&devices_lock);
 
 	mutex_init(&lp_lock);
-	mutex_init(&algo_switch_lock);
 	if (unlikely(pthread_cond_init(&lp_cond, NULL)))
 		quit(1, "Failed to pthread_cond_init lp_cond");
 
@@ -8175,7 +8163,6 @@ int main(int argc, char *argv[])
 			thr->id = k;
 			thr->cgpu = cgpu;
 			thr->device_thread = j;
-			thr->algorithm = *default_algorithm;
 
 			if (!cgpu->drv->thread_prepare(thr))
 				continue;

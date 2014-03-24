@@ -484,6 +484,7 @@ struct cgpu_info {
 	size_t work_size;
 	enum cl_kernels kernel;
 	cl_ulong max_alloc;
+  algorithm_t algorithm;
 
 	int opt_lg, lookup_gap;
 	size_t opt_tc, thread_concurrency;
@@ -573,8 +574,6 @@ struct thr_info {
 
 	bool	work_restart;
 	bool	work_update;
-
-	algorithm_t algorithm;
 };
 
 struct string_elist {
