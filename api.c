@@ -2140,13 +2140,13 @@ static bool pooldetails(char *param, char **url, char **user, char **pass, char 
 	// copy pass
 	copyadvanceafter(',', &param, &buf);
 
-	if (!*param) // missing pass
-		goto exitsama;
-
-	*algorithm = buf;
-
-	// copy algorithm
-	copyadvanceafter(',', &param, &buf);
+	if (!*param) // missing algorithm
+		*algorithm = "scrypt";
+	else {
+		*algorithm = buf;
+		// copy algorithm
+		copyadvanceafter(',', &param, &buf);
+	}
 
 	return true;
 
