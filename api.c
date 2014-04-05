@@ -2111,7 +2111,7 @@ static void copyadvanceafter(char ch, char **param, char **buf)
 	*(dst_b++) = '\0';
 }
 
-static bool pooldetails(char *param, char **url, char **user, char **pass)
+static bool pooldetails(char *param, char **url, char **user, char **pass, char **algorithm)
 {
 	char *ptr, *buf;
 
@@ -2140,6 +2140,14 @@ static bool pooldetails(char *param, char **url, char **user, char **pass)
 	// copy pass
 	copyadvanceafter(',', &param, &buf);
 
+	if (!*param) // missing pass
+		goto exitsama;
+
+	*algorithm = buf;
+
+	// copy algorithm
+	copyadvanceafter(',', &param, &buf);
+
 	return true;
 
 exitsama:
@@ -2149,7 +2157,7 @@ exitsama:
 
 static void addpool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, __maybe_unused char group)
 {
-	char *url, *user, *pass;
+	char *url, *user, *pass, *algorithm;
 	struct pool *pool;
 	char *ptr;
 
@@ -2158,7 +2166,7 @@ static void addpool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *
 		return;
 	}
 
-	if (!pooldetails(param, &url, &user, &pass)) {
+	if (!pooldetails(param, &url, &user, &pass, &algorithm)) {
 		ptr = escape_string(param, isjson);
 		message(io_data, MSG_INVPDP, 0, ptr, isjson);
 		if (ptr != param)
@@ -2169,7 +2177,7 @@ static void addpool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *
 
 	pool = add_pool();
 	detect_stratum(pool, url);
-	add_pool_details(pool, true, url, user, pass);
+	add_pool_details(pool, true, url, user, pass, algorithm);
 
 	ptr = escape_string(url, isjson);
 	message(io_data, MSG_ADDPOOL, 0, ptr, isjson);

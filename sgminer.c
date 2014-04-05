@@ -7503,7 +7503,7 @@ static void *test_pool_thread(void *arg)
 /* Always returns true that the pool details were added unless we are not
  * live, implying this is the only pool being added, so if no pools are
  * active it returns false. */
-bool add_pool_details(struct pool *pool, bool live, char *url, char *user, char *pass)
+bool add_pool_details(struct pool *pool, bool live, char *url, char *user, char *pass, char *algorithm)
 {
 	size_t siz;
 
@@ -7512,6 +7512,7 @@ bool add_pool_details(struct pool *pool, bool live, char *url, char *user, char 
 	pool->rpc_url = url;
 	pool->rpc_user = user;
 	pool->rpc_pass = pass;
+	set_algorithm(&pool->algorithm, algorithm);
 	siz = strlen(pool->rpc_user) + strlen(pool->rpc_pass) + 2;
 	pool->rpc_userpass = (char *)malloc(siz);
 	if (!pool->rpc_userpass)
@@ -7568,7 +7569,7 @@ static bool input_pool(bool live)
 		url = httpinput;
 	}
 
-	ret = add_pool_details(pool, live, url, user, pass);
+	ret = add_pool_details(pool, live, url, user, pass, "scrypt");
 out:
 	immedok(logwin, false);
 
