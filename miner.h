@@ -1042,6 +1042,7 @@ extern int set_fanspeed(int gpu, int iFanSpeed);
 extern int set_vddc(int gpu, float fVddc);
 extern int set_engineclock(int gpu, int iEngineClock);
 extern int set_memoryclock(int gpu, int iMemoryClock);
+extern int set_powertune(int gpu, int iPercentage);
 #endif
 
 extern void api(int thr_id);

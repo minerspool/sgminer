@@ -271,6 +271,8 @@ static const char *JSON_PARAMETER = "parameter";
 #define MSG_INVPDP 53
 #define MSG_TOOMANYP 54
 #define MSG_ADDPOOL 55
+#define MSG_GPUPERR 56
+#define MSG_GPUPOWER 57
 
 #define MSG_NOTIFY 60
 
