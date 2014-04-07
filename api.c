@@ -380,6 +380,8 @@ struct CODES {
  { SEVERITY_SUCC,  MSG_GPUVDDC,	PARAM_BOTH,	"Setting GPU %d vddc to (%s) reported success" },
  { SEVERITY_ERR,   MSG_GPUFERR,	PARAM_BOTH,	"Setting GPU %d fan to (%s) reported failure" },
  { SEVERITY_SUCC,  MSG_GPUFAN,	PARAM_BOTH,	"Setting GPU %d fan to (%s) reported success" },
+ { SEVERITY_ERR,   MSG_GPUPERR,	PARAM_BOTH,	"Setting GPU %d powertune to (%s) reported failure" },
+ { SEVERITY_SUCC,  MSG_GPUPOWER,PARAM_BOTH,	"Setting GPU %d powertune to (%s) reported success" },
  { SEVERITY_ERR,   MSG_MISFN,	PARAM_NONE,	"Missing save filename parameter" },
  { SEVERITY_ERR,   MSG_BADFN,	PARAM_STR,	"Can't open or create save file '%s'" },
  { SEVERITY_SUCC,  MSG_SAVED,	PARAM_STR,	"Configuration saved to file '%s'" },
@@ -2564,6 +2566,27 @@ static void gpuvddc(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __mayb
 #endif
 }
 
+static void gpupowertune(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson, __maybe_unused char group)
+{
+#ifdef HAVE_ADL
+	int id;
+	char *value;
+	int powertune;
+
+	if (!splitgpuvalue(io_data, param, &id, &value, isjson))
+		return;
+
+	powertune = atoi(value);
+
+	if (set_powertune(id, powertune))
+		message(io_data, MSG_GPUPERR, id, value, isjson);
+	else
+		message(io_data, MSG_GPUPOWER, id, value, isjson);
+#else
+	message(io_data, MSG_NOADL, 0, NULL, isjson);
+#endif
+}
+
 void doquit(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson, __maybe_unused char group)
 {
 	if (isjson)
@@ -3074,6 +3097,7 @@ struct CMDS {
 	{ "gpuengine",          gpuengine,      true,	false },
 	{ "gpufan",             gpufan,         true,	false },
 	{ "gpuvddc",            gpuvddc,        true,	false },
+	{ "gpupowertune",   	gpupowertune,   true,   false },
 	{ "save",		dosave,		true,	false },
 	{ "quit",		doquit,		true,	false },
 	{ "privileged",		privileged,	true,	false },
